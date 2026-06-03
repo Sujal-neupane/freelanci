@@ -1,0 +1,208 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CLIENT
+  FREELANCER
+  ADMIN
+}
+
+enum JobStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  DISPUTED
+  CANCELLED
+}
+
+enum BidStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+enum TransactionStatus {
+  HELD
+  RELEASED
+  REFUNDED
+  DISPUTED
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+}
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model User {
+  id                  String    @id @default(uuid())
+  email               String    @unique
+  name                String
+  passwordHash        String    @map("password_hash")
+  role                Role      @default(CLIENT)
+  mfaSecret           String?   @map("mfa_secret")
+  mfaEnabled          Boolean   @default(false) @map("mfa_enabled")
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+  passwordChangedAt   DateTime  @default(now()) @map("password_changed_at")
+  suspended           Boolean   @default(false)
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  jobs              Job[]             @relation("ClientJobs")
+  bids              Bid[]
+  passwordHistories PasswordHistory[]
+  auditLogs         AuditLog[]
+  disputesRaised    Dispute[]         @relation("DisputeRaisedBy")
+  disputesResolved  Dispute[]         @relation("DisputeResolvedBy")
+  clientTransactions    Transaction[] @relation("ClientTransactions")
+  freelancerTransactions Transaction[] @relation("FreelancerTransactions")
+  securityAlerts    SecurityAlert[]
+
+  @@map("users")
+}
+
+model Job {
+  id          String    @id @default(uuid())
+  title       String
+  description String
+  budget      Float
+  skills      String[]
+  status      JobStatus @default(OPEN)
+  clientId    String    @map("client_id")
+  hiredFreelancerId String? @map("hired_freelancer_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  client      User      @relation("ClientJobs", fields: [clientId], references: [id])
+  bids        Bid[]
+  disputes    Dispute[]
+  transactions Transaction[]
+
+  @@map("jobs")
+}
+
+model Bid {
+  id           String    @id @default(uuid())
+  amount       Float
+  proposal     String
+  status       BidStatus @default(PENDING)
+  freelancerId String    @map("freelancer_id")
+  jobId        String    @map("job_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  freelancer   User      @relation(fields: [freelancerId], references: [id])
+  job          Job       @relation(fields: [jobId], references: [id])
+
+  @@unique([freelancerId, jobId])
+  @@map("bids")
+}
+
+model Transaction {
+  id                    String            @id @default(uuid())
+  amount                Float
+  stripePaymentIntentId String?           @unique @map("stripe_payment_intent_id")
+  status                TransactionStatus @default(HELD)
+  jobId                 String            @map("job_id")
+  clientId              String            @map("client_id")
+  freelancerId          String?           @map("freelancer_id")
+  createdAt             DateTime          @default(now()) @map("created_at")
+  updatedAt             DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  job        Job  @relation(fields: [jobId], references: [id])
+  client     User @relation("ClientTransactions", fields: [clientId], references: [id])
+  freelancer User? @relation("FreelancerTransactions", fields: [freelancerId], references: [id])
+
+  @@map("transactions")
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  userId       String?  @map("user_id")
+  action       String
+  resourceType String   @map("resource_type")
+  resourceId   String?  @map("resource_id")
+  ipAddress    String   @map("ip_address")
+  userAgent    String   @map("user_agent")
+  metadata     Json?
+  timestamp    DateTime @default(now())
+
+  // Relations
+  user         User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+model PasswordHistory {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user         User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("password_histories")
+}
+
+model Dispute {
+  id           String        @id @default(uuid())
+  jobId        String        @map("job_id")
+  raisedById   String        @map("raised_by_id")
+  reason       String
+  status       DisputeStatus @default(OPEN)
+  resolution   String?
+  resolvedById String?       @map("resolved_by_id")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  resolvedAt   DateTime?     @map("resolved_at")
+
+  // Relations
+  job          Job           @relation(fields: [jobId], references: [id])
+  raisedBy     User          @relation("DisputeRaisedBy", fields: [raisedById], references: [id])
+  resolvedBy   User?         @relation("DisputeResolvedBy", fields: [resolvedById], references: [id])
+
+  @@map("disputes")
+}
+
+model SecurityAlert {
+  id           String        @id @default(uuid())
+  type         String
+  severity     AlertSeverity @default(MEDIUM)
+  message      String
+  ipAddress    String?       @map("ip_address")
+  userId       String?       @map("user_id")
+  acknowledged Boolean       @default(false)
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  // Relations
+  user         User?         @relation(fields: [userId], references: [id])
+
+  @@index([severity])
+  @@index([createdAt])
+  @@map("security_alerts")
+}
