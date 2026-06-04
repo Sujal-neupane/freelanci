@@ -1,12 +1,13 @@
 import express from 'express';
 import session from 'express-session';
-import RedisStore from 'connect-redis';
+import { RedisStore } from 'connect-redis';
 import { Redis } from 'ioredis';
 import helmet from 'helmet';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import logger from './utils/logger';
-import { globalLimiter, authLimiter } from './middleware/rateLimit';
+import { globalLimiter, authLimiter, authenticatedApiLimiter } from './middleware/rateLimit';
+import { generateCsrfToken, verifyCsrfToken } from './middleware/csrf';
 import authRoutes from './routes/auth';
 import jobRoutes from './routes/jobs';
 import bidRoutes from './routes/bids';
@@ -47,11 +48,22 @@ app.use(helmet({
 }));
 
 // ─── CORS ────────────────────────────────────────────────────────
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',');
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    // In strict prod environments you might want to reject these
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      logger.warn('CORS blocked request from unauthorized origin', { origin });
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-XSRF-TOKEN']
 }));
 
 // ─── Body Parsers ────────────────────────────────────────────────
@@ -88,6 +100,18 @@ if (process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1);
 }
 
+// ─── Strict Cache-Control Headers ────────────────────────────────
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
+// ─── CSRF Protection ─────────────────────────────────────────────
+app.use(generateCsrfToken);
+app.use('/api', verifyCsrfToken);
+
 // ─── Rate Limiting ───────────────────────────────────────────────
 app.use('/api/', globalLimiter);
 app.use('/api/auth/', authLimiter);
@@ -103,12 +127,14 @@ app.use((req, _res, next) => {
 
 // ─── API Routes ──────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
-app.use('/api/jobs', jobRoutes);
-app.use('/api/jobs', bidRoutes);
-app.use('/api/payments', paymentRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/disputes', disputeRoutes);
-app.use('/api/files', fileRoutes);
+
+// Apply strict authenticated rate limits to feature routes
+app.use('/api/jobs', authenticatedApiLimiter, jobRoutes);
+app.use('/api/jobs', authenticatedApiLimiter, bidRoutes);
+app.use('/api/payments', authenticatedApiLimiter, paymentRoutes);
+app.use('/api/admin', authenticatedApiLimiter, adminRoutes);
+app.use('/api/disputes', authenticatedApiLimiter, disputeRoutes);
+app.use('/api/files', authenticatedApiLimiter, fileRoutes);
 
 // ─── Health Check ────────────────────────────────────────────────
 app.get('/api/health', async (_req, res) => {
