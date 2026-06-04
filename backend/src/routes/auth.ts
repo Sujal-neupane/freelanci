@@ -86,6 +86,8 @@ router.post('/login', async (req: Request, res: Response) => {
     req.session.userAgent = userAgent;
     req.session.mfaVerified = true;
     req.session.mfaPending = false;
+    req.session.createdAt = Date.now();
+    req.session.lastActive = Date.now();
 
     res.json({
       message: 'Login successful',
@@ -153,6 +155,8 @@ router.post('/login/mfa', async (req: Request, res: Response) => {
     req.session.mfaVerified = true;
     req.session.mfaPending = false;
     req.session.pendingUserId = undefined;
+    req.session.createdAt = Date.now();
+    req.session.lastActive = Date.now();
 
     res.json({
       message: 'MFA verification successful',
