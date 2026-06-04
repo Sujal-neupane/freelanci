@@ -8,6 +8,25 @@ const apiClient = axios.create({
   },
 });
 
+// Helper to get cookie by name
+const getCookie = (name: string) => {
+  const value = `; ${document.cookie}`;
+  const parts = value.split(`; ${name}=`);
+  if (parts.length === 2) return parts.pop()?.split(';').shift();
+};
+
+// Request interceptor to attach CSRF token
+apiClient.interceptors.request.use((config) => {
+  // Only attach for state-changing requests
+  if (config.method && ['post', 'put', 'patch', 'delete'].includes(config.method.toLowerCase())) {
+    const csrfToken = getCookie('XSRF-TOKEN');
+    if (csrfToken) {
+      config.headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
+  return config;
+});
+
 // Response interceptor to handle global 401s (session expired)
 apiClient.interceptors.response.use(
   (response) => response,
