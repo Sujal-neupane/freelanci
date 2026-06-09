@@ -162,6 +162,10 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
     stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
 
+  if (res.headersSent) {
+    return _next(err);
+  }
+
   res.status(500).json({
     error: process.env.NODE_ENV === 'development'
       ? err.message
