@@ -1,31 +1,38 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { useIdleTimeout } from './hooks/useIdleTimeout';
+import { Sidebar } from './components/Sidebar';
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
 import { MFASetup } from './pages/MFASetup';
+import { Dashboard } from './pages/Dashboard';
+import { Jobs } from './pages/Jobs';
+import { JobDetail } from './pages/JobDetail';
+import { Settings } from './pages/Settings';
 
-// Placeholder Dashboard for now
-const Dashboard = () => {
-  const { user, logout } = useAuth();
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="loading"><div className="spinner" /></div>;
+  if (!user) return <Navigate to="/login" />;
+  return <>{children}</>;
+};
+
+const AppLayout = ({ children }: { children: React.ReactNode }) => {
   return (
-    <div className="p-8">
-      <h1 className="text-2xl font-bold">Dashboard</h1>
-      <p>Welcome, {user?.name} ({user?.role})</p>
-      {!user?.mfaEnabled && (
-        <a href="/mfa-setup" className="text-blue-500 underline mt-2 block">Set up Two-Factor Authentication</a>
-      )}
-      <button onClick={logout} className="mt-4 px-4 py-2 bg-red-500 text-white rounded">Logout</button>
+    <div className="app-layout">
+      <Sidebar />
+      <main className="main-content">
+        {children}
+      </main>
     </div>
   );
 };
 
-const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading } = useAuth();
-  if (loading) return <div>Loading...</div>;
-  if (!user) return <Navigate to="/login" />;
-  return <>{children}</>;
-};
+const ProtectedPage = ({ children }: { children: React.ReactNode }) => (
+  <ProtectedRoute>
+    <AppLayout>{children}</AppLayout>
+  </ProtectedRoute>
+);
 
 const AppContent = () => {
   useIdleTimeout();
@@ -36,15 +43,12 @@ const AppContent = () => {
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/mfa-setup" element={
-        <ProtectedRoute>
-          <MFASetup />
-        </ProtectedRoute>
+        <ProtectedRoute><MFASetup /></ProtectedRoute>
       } />
-      <Route path="/dashboard" element={
-        <ProtectedRoute>
-          <Dashboard />
-        </ProtectedRoute>
-      } />
+      <Route path="/dashboard" element={<ProtectedPage><Dashboard /></ProtectedPage>} />
+      <Route path="/jobs" element={<ProtectedPage><Jobs /></ProtectedPage>} />
+      <Route path="/jobs/:id" element={<ProtectedPage><JobDetail /></ProtectedPage>} />
+      <Route path="/settings" element={<ProtectedPage><Settings /></ProtectedPage>} />
     </Routes>
   );
 };
