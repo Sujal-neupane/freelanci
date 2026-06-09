@@ -10,7 +10,7 @@ const router = Router();
 const prisma = new PrismaClient();
 
 // ─── POST /api/jobs/:id/bids — Submit bid (freelancers only) ─────
-router.post('/:id/bids', requireAuth, requireMfaComplete, requireRole('FREELANCER'),
+router.post('/jobs/:id/bids', requireAuth, requireMfaComplete, requireRole('FREELANCER'),
   async (req: Request, res: Response) => {
     try {
       const jobId = req.params.id as string;
@@ -79,7 +79,7 @@ router.post('/:id/bids', requireAuth, requireMfaComplete, requireRole('FREELANCE
 
 // ─── GET /api/jobs/:id/bids — List bids for a job ────────────────
 // Only job owner or admin can see all bids
-router.get('/:id/bids', requireAuth, requireMfaComplete, async (req: Request, res: Response) => {
+router.get('/jobs/:id/bids', requireAuth, requireMfaComplete, async (req: Request, res: Response) => {
   try {
     const jobId = req.params.id as string;
 
@@ -111,7 +111,7 @@ router.get('/:id/bids', requireAuth, requireMfaComplete, async (req: Request, re
 });
 
 // ─── GET /api/bids/my — Freelancer's own bids ────────────────────
-router.get('/my', requireAuth, requireMfaComplete, requireRole('FREELANCER'),
+router.get('/bids/my', requireAuth, requireMfaComplete, requireRole('FREELANCER'),
   async (req: Request, res: Response) => {
     try {
       const bids = await prisma.bid.findMany({

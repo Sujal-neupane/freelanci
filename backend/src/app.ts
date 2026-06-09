@@ -130,7 +130,7 @@ app.use('/api/auth', authRoutes);
 
 // Apply strict authenticated rate limits to feature routes
 app.use('/api/jobs', authenticatedApiLimiter, jobRoutes);
-app.use('/api/jobs', authenticatedApiLimiter, bidRoutes);
+app.use('/api', authenticatedApiLimiter, bidRoutes);
 app.use('/api/payments', authenticatedApiLimiter, paymentRoutes);
 app.use('/api/admin', authenticatedApiLimiter, adminRoutes);
 app.use('/api/disputes', authenticatedApiLimiter, disputeRoutes);
