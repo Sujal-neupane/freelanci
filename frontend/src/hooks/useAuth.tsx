@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { User, getMe, logout as apiLogout } from '../api/auth';
+import { createContext, useContext, useState, useEffect } from 'react';
+import type { ReactNode } from 'react';
+import { getMe, logout as apiLogout } from '../api/auth';
+import type { User } from '../api/auth';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 interface AuthContextType {

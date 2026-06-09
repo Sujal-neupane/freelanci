@@ -6,7 +6,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function useIdleTimeout() {
   const { user, logout } = useAuth();
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleIdleTimeout = useCallback(() => {
     if (user) {

@@ -38,8 +38,16 @@ export function verifyCsrfToken(req: Request, res: Response, next: NextFunction)
     return;
   }
 
+  // Public auth endpoints must be able to create the first session/CSRF token.
+  // The browser cannot attach XSRF headers until it has already received a token.
+  const requestPath = `${req.baseUrl}${req.path}`;
+  if (requestPath === '/api/auth/register' || requestPath === '/api/auth/login') {
+    next();
+    return;
+  }
+
   // Stripe webhooks have their own signature verification and don't use sessions/CSRF
-  if (req.path.startsWith('/api/webhooks/stripe')) {
+  if (requestPath.startsWith('/api/webhooks/stripe')) {
     next();
     return;
   }

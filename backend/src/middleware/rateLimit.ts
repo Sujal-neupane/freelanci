@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import { redis } from '../app';
 import logger from '../utils/logger';
@@ -54,7 +54,8 @@ export const authenticatedApiLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req) => {
     // Rate limit by User ID if authenticated, fallback to IP
-    return req.session?.userId ? `user:${req.session.userId}` : `ip:${req.ip}`;
+    const fallbackIp = req.ip || req.socket?.remoteAddress || 'unknown';
+    return req.session?.userId ? `user:${req.session.userId}` : ipKeyGenerator(fallbackIp);
   },
   message: {
     error: 'Too many API requests — please slow down',
