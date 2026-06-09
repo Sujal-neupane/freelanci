@@ -19,7 +19,7 @@ export function requireOwnership(resourceType: 'job' | 'bid' | 'dispute', paramN
     const resourceId = req.params[paramName];
     const userId = req.session.userId;
 
-    if (!resourceId || !userId) {
+    if (!resourceId || !userId || typeof resourceId !== 'string') {
       res.status(400).json({ error: 'Invalid request' });
       return;
     }
