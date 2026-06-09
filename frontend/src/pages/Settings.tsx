@@ -26,7 +26,7 @@ export function Settings() {
     setLoading(true);
     try {
       await apiClient.post('/auth/change-password', {
-        currentPassword,
+        oldPassword: currentPassword,
         newPassword
       });
       setSuccess('Password changed successfully');
