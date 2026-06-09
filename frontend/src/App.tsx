@@ -9,6 +9,12 @@ import { Dashboard } from './pages/Dashboard';
 import { Jobs } from './pages/Jobs';
 import { JobDetail } from './pages/JobDetail';
 import { Settings } from './pages/Settings';
+import { Bids } from './pages/Bids';
+import { Payments } from './pages/Payments';
+import { Disputes } from './pages/Disputes';
+import { AdminUsers } from './pages/AdminUsers';
+import { AdminAuditLogs } from './pages/AdminAuditLogs';
+import { AdminAlerts } from './pages/AdminAlerts';
 
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, loading } = useAuth();
@@ -48,6 +54,12 @@ const AppContent = () => {
       <Route path="/dashboard" element={<ProtectedPage><Dashboard /></ProtectedPage>} />
       <Route path="/jobs" element={<ProtectedPage><Jobs /></ProtectedPage>} />
       <Route path="/jobs/:id" element={<ProtectedPage><JobDetail /></ProtectedPage>} />
+      <Route path="/bids" element={<ProtectedPage><Bids /></ProtectedPage>} />
+      <Route path="/payments" element={<ProtectedPage><Payments /></ProtectedPage>} />
+      <Route path="/disputes" element={<ProtectedPage><Disputes /></ProtectedPage>} />
+      <Route path="/admin/users" element={<ProtectedPage><AdminUsers /></ProtectedPage>} />
+      <Route path="/admin/audit-logs" element={<ProtectedPage><AdminAuditLogs /></ProtectedPage>} />
+      <Route path="/admin/alerts" element={<ProtectedPage><AdminAlerts /></ProtectedPage>} />
       <Route path="/settings" element={<ProtectedPage><Settings /></ProtectedPage>} />
     </Routes>
   );

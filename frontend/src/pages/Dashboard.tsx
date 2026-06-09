@@ -32,7 +32,7 @@ export function Dashboard() {
         } else if (user?.role === 'FREELANCER') {
           const [jobsRes, bidsRes] = await Promise.all([
             apiClient.get('/jobs?limit=5'),
-            apiClient.get('/jobs/my') // bids/my is mounted under /api/jobs
+            apiClient.get('/bids/my')
           ]);
           setRecentJobs(jobsRes.data.jobs || []);
           const bids = bidsRes.data.bids || [];
