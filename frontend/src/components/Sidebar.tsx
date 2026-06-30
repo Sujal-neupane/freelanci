@@ -2,7 +2,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import {
   LayoutDashboard, Briefcase, FileText, CreditCard,
-  Shield, AlertTriangle, LogOut, Settings
+  Shield, AlertTriangle, LogOut, Settings, History
 } from 'lucide-react';
 
 export function Sidebar() {
@@ -19,6 +19,7 @@ export function Sidebar() {
     { path: '/bids', icon: FileText, label: 'My Bids', roles: ['FREELANCER'] },
     { path: '/payments', icon: CreditCard, label: 'Payments' },
     { path: '/disputes', icon: AlertTriangle, label: 'Disputes' },
+    { path: '/activity-log', icon: History, label: 'Activity Log' },
   ];
 
   const adminItems = [
