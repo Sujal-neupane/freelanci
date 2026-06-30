@@ -2,13 +2,21 @@ import bcrypt from 'bcrypt';
 import { PrismaClient, Role } from '@prisma/client';
 import { validateEmail, validatePasswordStrength, checkHaveIBeenPwned } from '../utils/validators';
 import { createAuditLog } from './auditService';
-import { checkLockout, recordFailedAttempt, resetAttempts } from './lockoutService';
+import { checkLockout, recordFailedAttempt, resetAttempts, MAX_ATTEMPTS } from './lockoutService';
 import logger from '../utils/logger';
 
 const prisma = new PrismaClient();
 const BCRYPT_COST_FACTOR = 12;
 const PASSWORD_HISTORY_LIMIT = 5;
 const PASSWORD_EXPIRY_DAYS = 90;
+
+// A real bcrypt hash (of a value no user will ever submit) used to equalise
+// login response time when the account does not exist. Without this, a missing
+// account skips the ~200ms bcrypt comparison and returns noticeably faster,
+// letting an attacker enumerate valid emails by timing alone
+// (PortSwigger: "Username enumeration via response timing"). Computed once at
+// startup so the per-request cost matches a genuine comparison.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('timing-attack-mitigation-placeholder', BCRYPT_COST_FACTOR);
 
 // ─── Registration ────────────────────────────────────────────────
 
@@ -123,7 +131,11 @@ export async function login(
   // Find user
   const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
   if (!user) {
-    // Still record failed attempt to prevent user enumeration timing attacks
+    // Perform a dummy bcrypt comparison so the response takes the same time as
+    // a real (wrong-password) login. This removes the timing side-channel that
+    // would otherwise reveal whether an email is registered.
+    await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+    // Still record failed attempt to prevent user enumeration via lockout state.
     await recordFailedAttempt(normalizedEmail, ip, userAgent);
     return { success: false, error: 'Invalid email or password' };
   }
@@ -159,7 +171,7 @@ export async function login(
     return {
       success: false,
       error: 'Invalid email or password',
-      remainingAttempts: 5 - lockResult.attempts
+      remainingAttempts: MAX_ATTEMPTS - lockResult.attempts
     };
   }
 
