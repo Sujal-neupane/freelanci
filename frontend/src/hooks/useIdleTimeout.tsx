@@ -1,8 +1,8 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './useAuth';
 
-// Match backend idle timeout (30 minutes)
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+// Match backend idle timeout (2 hours)
+const IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 export function useIdleTimeout() {
   const { user, logout } = useAuth();
