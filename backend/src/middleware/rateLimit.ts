@@ -1,23 +1,37 @@
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import RedisStore from 'rate-limit-redis';
-import { redis } from '../app';
+import { RedisStore } from 'rate-limit-redis';
+import { redis } from '../utils/redis';
+import { recordStrike } from './ipAccess';
 import logger from '../utils/logger';
 
 /**
+ * Builds a Redis-backed store for a limiter. Counters live in Redis so limits
+ * are enforced consistently across every server instance and survive restarts
+ * (a MemoryStore would reset on each deploy and not share state across nodes).
+ */
+function redisStore(prefix: string): RedisStore {
+  return new RedisStore({
+    prefix,
+    sendCommand: (...args: string[]) => (redis as any).call(...args) as Promise<any>
+  });
+}
+
+/**
  * Global rate limiter: 100 requests per 15 minutes per IP.
- * Counters stored in Redis so limits survive server restarts.
  */
 export const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,  // 15 minutes
   max: 100,
+  store: redisStore('rl:global:'),
   standardHeaders: true,      // RateLimit-* headers
   legacyHeaders: false,
   message: {
     error: 'Too many requests — please try again later',
     retryAfter: '15 minutes'
   },
-  handler: (_req, res, _next, options) => {
-    logger.warn('Global rate limit exceeded', { ip: _req.ip });
+  handler: (req, res, _next, options) => {
+    logger.warn('Global rate limit exceeded', { ip: req.ip });
+    void recordStrike(req.ip || 'unknown', 'global rate limit exceeded');
     res.status(429).json(options.message);
   }
 });
@@ -28,15 +42,27 @@ export const globalLimiter = rateLimit({
  */
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 20,
+  store: redisStore('rl:auth:'),
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Prefer per-account rate limiting when an email is present to better protect accounts
+    const email = req.body && (req.body as any).email;
+    if (email && typeof email === 'string') {
+      return `auth:email:${email.toLowerCase()}`;
+    }
+    // Use ipKeyGenerator to properly handle IPv6 addresses and format the key
+    // It expects (req, number) as parameters where number is a trustProxy value
+    return ipKeyGenerator(req as any, 0);
+  },
   message: {
     error: 'Too many authentication attempts — please try again later',
     retryAfter: '15 minutes'
   },
-  handler: (_req, res, _next, options) => {
-    logger.warn('Auth rate limit exceeded', { ip: _req.ip });
+  handler: (req, res, _next, options) => {
+    logger.warn('Auth rate limit exceeded', { ip: req.ip });
+    void recordStrike(req.ip || 'unknown', 'auth rate limit exceeded');
     res.status(429).json(options.message);
   },
   skipSuccessfulRequests: true  // Only count failed attempts
@@ -50,12 +76,16 @@ export const authLimiter = rateLimit({
 export const authenticatedApiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
+  store: redisStore('rl:apiuser:'),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
     // Rate limit by User ID if authenticated, fallback to IP
-    const fallbackIp = req.ip || req.socket?.remoteAddress || 'unknown';
-    return req.session?.userId ? `user:${req.session.userId}` : ipKeyGenerator(fallbackIp);
+    if (req.session?.userId) {
+      return `user:${req.session.userId}`;
+    }
+    // Use ipKeyGenerator to properly handle IPv6 addresses and format the key
+    return ipKeyGenerator(req as any, 0);
   },
   message: {
     error: 'Too many API requests — please slow down',
