@@ -2,8 +2,20 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { requireAuth, requireMfaComplete } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { getAuditLogs } from '../services/auditService';
+import { getAuditLogs, createAuditLog } from '../services/auditService';
+import {
+  addToBlocklist, removeFromBlocklist,
+  addToAllowlist, removeFromAllowlist, listIpRules
+} from '../middleware/ipAccess';
 import logger from '../utils/logger';
+
+// Accepts an IPv4/IPv6 address (admin-supplied). Kept deliberately simple — we
+// store exact-match strings, not CIDR ranges.
+function isValidIp(value: unknown): value is string {
+  return typeof value === 'string' &&
+    (/^(\d{1,3}\.){3}\d{1,3}$/.test(value) || /^[0-9a-fA-F:]+$/.test(value)) &&
+    value.length <= 45;
+}
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -152,6 +164,95 @@ router.get('/metrics', async (_req: Request, res: Response) => {
   } catch (error) {
     logger.error('Admin metrics error', { error: (error as Error).message });
     res.status(500).json({ error: 'Failed to fetch metrics' });
+  }
+});
+
+// ─── IP Access Control management ─────────────────────────────────
+
+// GET /api/admin/ip-rules — current block-list and allow-list
+router.get('/ip-rules', async (_req: Request, res: Response) => {
+  try {
+    const rules = await listIpRules();
+    res.json(rules);
+  } catch (error) {
+    logger.error('List IP rules error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to fetch IP rules' });
+  }
+});
+
+// POST /api/admin/ip-rules — add an IP to the block-list or allow-list
+// body: { ip: string, list: 'block' | 'allow' }
+router.post('/ip-rules', async (req: Request, res: Response) => {
+  try {
+    const { ip, list } = req.body;
+
+    if (!isValidIp(ip)) {
+      res.status(400).json({ error: 'A valid IP address is required' });
+      return;
+    }
+    if (list !== 'block' && list !== 'allow') {
+      res.status(400).json({ error: "list must be 'block' or 'allow'" });
+      return;
+    }
+
+    if (list === 'block') {
+      await addToBlocklist(ip);
+    } else {
+      await addToAllowlist(ip);
+    }
+
+    await createAuditLog({
+      userId: req.session.userId,
+      action: list === 'block' ? 'IP_BLOCKLISTED' : 'IP_ALLOWLISTED',
+      resourceType: 'ip_rule',
+      resourceId: ip,
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('User-Agent') || 'unknown',
+      metadata: { ip, list }
+    });
+
+    res.json({ message: `IP ${ip} added to ${list}-list` });
+  } catch (error) {
+    logger.error('Add IP rule error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to add IP rule' });
+  }
+});
+
+// DELETE /api/admin/ip-rules — remove an IP from a list
+// body: { ip: string, list: 'block' | 'allow' }
+router.delete('/ip-rules', async (req: Request, res: Response) => {
+  try {
+    const { ip, list } = req.body;
+
+    if (!isValidIp(ip)) {
+      res.status(400).json({ error: 'A valid IP address is required' });
+      return;
+    }
+    if (list !== 'block' && list !== 'allow') {
+      res.status(400).json({ error: "list must be 'block' or 'allow'" });
+      return;
+    }
+
+    if (list === 'block') {
+      await removeFromBlocklist(ip);
+    } else {
+      await removeFromAllowlist(ip);
+    }
+
+    await createAuditLog({
+      userId: req.session.userId,
+      action: list === 'block' ? 'IP_UNBLOCKLISTED' : 'IP_UNALLOWLISTED',
+      resourceType: 'ip_rule',
+      resourceId: ip,
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('User-Agent') || 'unknown',
+      metadata: { ip, list }
+    });
+
+    res.json({ message: `IP ${ip} removed from ${list}-list` });
+  } catch (error) {
+    logger.error('Remove IP rule error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to remove IP rule' });
   }
 });
 
