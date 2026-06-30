@@ -21,13 +21,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
 
   useEffect(() => {
-    // Exclude public routes from strict auth checks to prevent redirect loops
-    const isPublicRoute = ['/login', '/register', '/mfa-setup'].includes(location.pathname);
+    // Only check auth once on mount
+    const isAuthRoute = ['/login', '/register'].includes(location.pathname);
     
     getMe()
       .then((userData) => {
         setUser(userData);
-        if (isPublicRoute) {
+        // Only redirect away from login/register if already authenticated
+        // Don't redirect from /mfa-setup — user needs to stay there
+        if (isAuthRoute) {
           navigate('/dashboard');
         }
       })
