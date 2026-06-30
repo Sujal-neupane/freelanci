@@ -5,7 +5,7 @@ import {
   getRegistrationOptions, verifyRegistration,
   getAuthenticationOptions, verifyAuthentication
 } from '../services/webauthnService';
-import { createAuditLog } from '../services/auditService';
+import { createAuditLog, getAuditLogs } from '../services/auditService';
 import { createSecurityAlert } from '../services/alertService';
 import { requireAuth, requireMfaComplete } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
@@ -676,6 +676,35 @@ router.post('/webauthn/login/verify', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('WebAuthn login verify error', { error: (error as Error).message });
     res.status(500).json({ error: 'Passwordless login failed' });
+  }
+});
+
+// ─── GET /api/auth/activity ──────────────────────────────────────
+// User-facing activity log: shows the current user's own audit events
+router.get('/activity', requireAuth, requireMfaComplete, async (req: Request, res: Response) => {
+  try {
+    const userId = req.session.userId!;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
+    const action = req.query.action as string;
+
+    const options: {
+      userId: string;
+      action?: string;
+      page: number;
+      limit: number;
+    } = { userId, page, limit };
+
+    if (action) {
+      options.action = action;
+    }
+
+    const result = await getAuditLogs(options);
+
+    res.json(result);
+  } catch (error) {
+    logger.error('Activity log error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to fetch activity log' });
   }
 });
 
