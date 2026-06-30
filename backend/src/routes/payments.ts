@@ -96,29 +96,53 @@ router.post('/release/:jobId', requireAuth, requireMfaComplete, requireRole('CLI
   try {
     const jobId = req.params.jobId as string;
 
-    const transaction = await prisma.transaction.findFirst({
-      where: { jobId, clientId: req.session.userId, status: 'HELD' },
-    });
+    // Serialise all release attempts for this job. Two concurrent requests can
+    // no longer both read status HELD and both capture/transfer funds.
+    const outcome = await withLock(`escrow:${jobId}`, async () => {
+      const transaction = await prisma.transaction.findFirst({
+        where: { jobId, clientId: req.session.userId, status: 'HELD' },
+      });
 
-    if (!transaction || !transaction.stripePaymentIntentId) {
-      res.status(404).json({ error: 'No funds currently held in escrow for this job' });
-      return;
-    }
+      if (!transaction || !transaction.stripePaymentIntentId) {
+        return { status: 404, body: { error: 'No funds currently held in escrow for this job' } };
+      }
 
-    // Capture the payment intent to transfer funds
-    const intent = await stripe.paymentIntents.capture(transaction.stripePaymentIntentId);
+      // Atomically claim the transaction: flip HELD -> RELEASED only if it is
+      // still HELD. count === 0 means another request already released it, so
+      // we must NOT capture again. This is the real double-release guard and
+      // holds even across multiple server instances.
+      const claim = await prisma.transaction.updateMany({
+        where: { id: transaction.id, status: 'HELD' },
+        data: { status: 'RELEASED' }
+      });
 
-    if (intent.status === 'succeeded') {
-      await prisma.$transaction([
-        prisma.transaction.update({
-          where: { id: transaction.id },
-          data: { status: 'RELEASED' }
-        }),
-        prisma.job.update({
-          where: { id: jobId },
-          data: { status: 'COMPLETED' }
-        })
-      ]);
+      if (claim.count === 0) {
+        return { status: 409, body: { error: 'Funds have already been released for this job' } };
+      }
+
+      try {
+        const intent = await stripe.paymentIntents.capture(transaction.stripePaymentIntentId!);
+
+        if (intent.status !== 'succeeded') {
+          // Capture failed — roll the claim back so the client can retry.
+          await prisma.transaction.updateMany({
+            where: { id: transaction.id, status: 'RELEASED' },
+            data: { status: 'HELD' }
+          });
+          return { status: 400, body: { error: 'Failed to capture funds', status: intent.status } };
+        }
+      } catch (captureError) {
+        await prisma.transaction.updateMany({
+          where: { id: transaction.id, status: 'RELEASED' },
+          data: { status: 'HELD' }
+        });
+        throw captureError;
+      }
+
+      await prisma.job.update({
+        where: { id: jobId },
+        data: { status: 'COMPLETED' }
+      });
 
       await createAuditLog({
         userId: req.session.userId,
@@ -130,11 +154,15 @@ router.post('/release/:jobId', requireAuth, requireMfaComplete, requireRole('CLI
         metadata: { jobId, amount: transaction.amount }
       });
 
-      res.json({ message: 'Funds released to freelancer successfully' });
-    } else {
-      res.status(400).json({ error: 'Failed to capture funds', status: intent.status });
+      return { status: 200, body: { message: 'Funds released to freelancer successfully' } };
+    });
+
+    if (!outcome.acquired) {
+      res.status(409).json({ error: 'A release is already in progress for this job' });
+      return;
     }
 
+    res.status(outcome.result.status).json(outcome.result.body);
   } catch (error) {
     logger.error('Payment release error', { error: (error as Error).message });
     res.status(500).json({ error: 'Failed to release funds' });
