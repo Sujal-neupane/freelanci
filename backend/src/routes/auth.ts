@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { register, login, changePassword, forceResetPassword } from '../services/authService';
 import { generateMfaSecret, verifyMfaToken, enableMfa, disableMfa } from '../services/mfaService';
+import {
+  getRegistrationOptions, verifyRegistration,
+  getAuthenticationOptions, verifyAuthentication
+} from '../services/webauthnService';
 import { createAuditLog } from '../services/auditService';
 import { createSecurityAlert } from '../services/alertService';
 import { requireAuth, requireMfaComplete } from '../middleware/auth';
@@ -532,6 +536,146 @@ router.post('/force-reset', requireAuth, requireMfaComplete, requireRole('ADMIN'
   } catch (error) {
     logger.error('Force reset error', { error: (error as Error).message });
     res.status(500).json({ error: 'Password reset failed' });
+  }
+});
+
+// ─── WebAuthn / Passkey (passwordless) ───────────────────────────
+
+// POST /api/auth/webauthn/register/options — begin passkey enrolment
+router.post('/webauthn/register/options', requireAuth, requireMfaComplete, async (req: Request, res: Response) => {
+  try {
+    const userId = req.session.userId!;
+    const email = req.session.email!;
+    const options = await getRegistrationOptions(userId, email);
+
+    // Stash the challenge server-side; the verify step must match it.
+    req.session.webauthnChallenge = options.challenge;
+    res.json(options);
+  } catch (error) {
+    logger.error('WebAuthn register options error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to start passkey registration' });
+  }
+});
+
+// POST /api/auth/webauthn/register/verify — finish passkey enrolment
+router.post('/webauthn/register/verify', requireAuth, requireMfaComplete, async (req: Request, res: Response) => {
+  try {
+    const userId = req.session.userId!;
+    const expectedChallenge = req.session.webauthnChallenge;
+
+    if (!expectedChallenge) {
+      res.status(400).json({ error: 'No passkey registration in progress' });
+      return;
+    }
+
+    const verified = await verifyRegistration(userId, req.body, expectedChallenge);
+    req.session.webauthnChallenge = undefined;
+
+    if (!verified) {
+      res.status(400).json({ error: 'Passkey registration could not be verified' });
+      return;
+    }
+
+    await createAuditLog({
+      userId,
+      action: 'WEBAUTHN_REGISTERED',
+      resourceType: 'auth',
+      resourceId: userId,
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('User-Agent') || 'unknown'
+    });
+
+    res.json({ message: 'Passkey registered successfully' });
+  } catch (error) {
+    logger.error('WebAuthn register verify error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to register passkey' });
+  }
+});
+
+// POST /api/auth/webauthn/login/options — begin passwordless login
+router.post('/webauthn/login/options', async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+
+    const { options, userId } = await getAuthenticationOptions(email);
+
+    // Bind the challenge (and resolved user, if any) to the session.
+    req.session.webauthnChallenge = options.challenge;
+    req.session.webauthnUserId = userId;
+    res.json(options);
+  } catch (error) {
+    logger.error('WebAuthn login options error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Failed to start passwordless login' });
+  }
+});
+
+// POST /api/auth/webauthn/login/verify — finish passwordless login
+router.post('/webauthn/login/verify', async (req: Request, res: Response) => {
+  try {
+    const expectedChallenge = req.session.webauthnChallenge;
+    if (!expectedChallenge) {
+      res.status(400).json({ error: 'No passwordless login in progress' });
+      return;
+    }
+
+    const { verified, userId } = await verifyAuthentication(req.body, expectedChallenge);
+    req.session.webauthnChallenge = undefined;
+    req.session.webauthnUserId = undefined;
+
+    if (!verified || !userId) {
+      res.status(401).json({ error: 'Passkey authentication failed' });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true, role: true, mfaEnabled: true, suspended: true }
+    });
+
+    if (!user || user.suspended) {
+      res.status(403).json({ error: 'Account unavailable' });
+      return;
+    }
+
+    const userAgent = req.get('User-Agent') || 'unknown';
+
+    await createAuditLog({
+      userId: user.id,
+      action: 'WEBAUTHN_LOGIN_SUCCESS',
+      resourceType: 'auth',
+      resourceId: user.id,
+      ipAddress: req.ip || 'unknown',
+      userAgent
+    });
+
+    // Passkey verification is itself a strong, phishing-resistant factor, so it
+    // establishes a fully authenticated session (mfaVerified). Regenerate to
+    // prevent session fixation.
+    regenerateSessionSafe(req, {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      userAgent,
+      mfaVerified: true,
+      mfaPending: false
+    }, (err) => {
+      if (err) {
+        logger.error('Session regen failed (webauthn login)', { error: err.message });
+        res.status(500).json({ error: 'Failed to establish session' });
+        return;
+      }
+      res.json({
+        message: 'Passwordless login successful',
+        user: { id: user.id, email: user.email, name: user.name, role: user.role, mfaEnabled: user.mfaEnabled }
+      });
+    });
+  } catch (error) {
+    logger.error('WebAuthn login verify error', { error: (error as Error).message });
+    res.status(500).json({ error: 'Passwordless login failed' });
   }
 });
 
