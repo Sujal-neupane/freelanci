@@ -4,6 +4,7 @@ import Stripe from 'stripe';
 import { requireAuth, requireMfaComplete } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { createAuditLog } from '../services/auditService';
+import { withLock } from '../utils/lock';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -44,34 +45,46 @@ router.post('/fund/:jobId', requireAuth, requireMfaComplete, requireRole('CLIENT
 
     const acceptedBid = job.bids[0];
 
-    // Check if already funded
-    const existingTx = await prisma.transaction.findFirst({
-      where: { jobId, status: { in: ['HELD', 'RELEASED'] } }
+    // Serialise funding for this job so two concurrent requests cannot both
+    // pass the "already funded?" check and each create a PaymentIntent +
+    // escrow record (double-charge race).
+    const outcome = await withLock(`escrow:${jobId}`, async () => {
+      const existingTx = await prisma.transaction.findFirst({
+        where: { jobId, status: { in: ['HELD', 'RELEASED'] } }
+      });
+
+      if (existingTx) {
+        return { status: 400, body: { error: 'Job is already funded' } };
+      }
+
+      // Create a PaymentIntent with manual capture (escrow flow)
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(acceptedBid.amount * 100), // Stripe expects cents
+        currency: 'usd',
+        capture_method: 'manual', // Don't capture funds immediately
+        metadata: {
+          jobId: job.id,
+          clientId: req.session.userId!,
+          freelancerId: acceptedBid.freelancerId
+        },
+      });
+
+      return {
+        status: 200,
+        body: {
+          clientSecret: paymentIntent.client_secret,
+          amount: acceptedBid.amount,
+          message: 'Payment intent created. Proceed to client-side confirmation.'
+        }
+      };
     });
 
-    if (existingTx) {
-      res.status(400).json({ error: 'Job is already funded' });
+    if (!outcome.acquired) {
+      res.status(409).json({ error: 'A funding request is already in progress for this job' });
       return;
     }
 
-    // Create a PaymentIntent with manual capture (escrow flow)
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(acceptedBid.amount * 100), // Stripe expects cents
-      currency: 'usd',
-      capture_method: 'manual', // Don't capture funds immediately
-      metadata: {
-        jobId: job.id,
-        clientId: req.session.userId!,
-        freelancerId: acceptedBid.freelancerId
-      },
-    });
-
-    res.json({
-      clientSecret: paymentIntent.client_secret,
-      amount: acceptedBid.amount,
-      message: 'Payment intent created. Proceed to client-side confirmation.'
-    });
-
+    res.status(outcome.result.status).json(outcome.result.body);
   } catch (error) {
     logger.error('Payment funding error', { error: (error as Error).message });
     res.status(500).json({ error: 'Failed to initiate funding' });
