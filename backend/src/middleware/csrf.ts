@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import { recordStrike } from './ipAccess';
 import logger from '../utils/logger';
 
 /**
@@ -41,7 +42,15 @@ export function verifyCsrfToken(req: Request, res: Response, next: NextFunction)
   // Public auth endpoints must be able to create the first session/CSRF token.
   // The browser cannot attach XSRF headers until it has already received a token.
   const requestPath = `${req.baseUrl}${req.path}`;
-  if (requestPath === '/api/auth/register' || requestPath === '/api/auth/login') {
+  const csrfExemptPaths = [
+    '/api/auth/register',
+    '/api/auth/login',
+    '/api/auth/login/mfa',      // MFA step happens before full session is established
+    '/api/auth/force-reset',    // Admin password reset (protected by auth middleware separately)
+    '/api/auth/webauthn/login/options',  // Passwordless login — pre-session, like /login
+    '/api/auth/webauthn/login/verify',
+  ];
+  if (csrfExemptPaths.includes(requestPath)) {
     next();
     return;
   }
@@ -61,6 +70,7 @@ export function verifyCsrfToken(req: Request, res: Response, next: NextFunction)
       method: req.method,
       userId: req.session?.userId
     });
+    void recordStrike(req.ip || 'unknown', 'CSRF token validation failed');
     res.status(403).json({ error: 'Invalid or missing CSRF token' });
     return;
   }
