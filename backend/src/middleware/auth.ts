@@ -11,6 +11,9 @@ declare module 'express-session' {
     mfaVerified: boolean;
     mfaPending: boolean;
     pendingUserId?: string;
+    mfaAttempts?: number;
+    webauthnChallenge?: string;
+    webauthnUserId?: string;
     csrfToken?: string;
     createdAt: number;
     lastActive: number;
@@ -18,8 +21,8 @@ declare module 'express-session' {
 }
 
 // Session timeout constants
-const ABSOLUTE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const ABSOLUTE_TIMEOUT_MS = 15 * 24 * 60 * 60 * 1000; // 15 days
+const IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 
 /**
