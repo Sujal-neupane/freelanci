@@ -80,8 +80,8 @@ export function AdminAlerts() {
                         <ShieldAlert size={12} /> {alert.severity}
                       </span>
                     </td>
-                    <td><strong style={{ color: 'var(--color-text-title)' }}>{alert.alertType}</strong></td>
-                    <td style={{ maxWidth: '250px' }}>{alert.details}</td>
+                    <td><strong style={{ color: 'var(--color-text-title)' }}>{alert.type}</strong></td>
+                    <td style={{ maxWidth: '250px' }}>{alert.message}</td>
                     <td>{alert.ipAddress}</td>
                     <td>
                       {alert.user ? (
