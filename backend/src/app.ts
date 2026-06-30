@@ -1,13 +1,17 @@
 import express from 'express';
 import session from 'express-session';
 import RedisStore from 'connect-redis';
-import { Redis } from 'ioredis';
 import helmet from 'helmet';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
 import logger from './utils/logger';
+import { redis } from './utils/redis';
 import { globalLimiter, authLimiter, authenticatedApiLimiter } from './middleware/rateLimit';
+import { ipAccessControl } from './middleware/ipAccess';
+import { validateHost } from './middleware/hostValidation';
 import { generateCsrfToken, verifyCsrfToken } from './middleware/csrf';
+import { sanitizeRequest, safeJsonMiddleware } from './middleware/sanitize';
 import authRoutes from './routes/auth';
 import jobRoutes from './routes/jobs';
 import bidRoutes from './routes/bids';
@@ -16,16 +20,22 @@ import adminRoutes from './routes/admin';
 import disputeRoutes from './routes/disputes';
 import fileRoutes from './routes/files';
 
-dotenv.config({ path: '../.env' });
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const app = express();
+app.disable('x-powered-by');
 const PORT = process.env.PORT || 3001;
 
-// ─── Redis Client ────────────────────────────────────────────────
-export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+// ─── Host header allow-list (mounted first) ──────────────────────
+// Rejects forged Host headers before any code consumes them (HTTPS redirect,
+// generated links), preventing Host-header injection / reset poisoning.
+app.use(validateHost);
 
-redis.on('connect', () => logger.info('Redis connected'));
-redis.on('error', (err) => logger.error('Redis error', { error: err.message }));
+// ─── CORS origins (computed early so CSP can reuse) ─────────────
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
 // ─── Security Headers (Helmet) ──────────────────────────────────
 app.use(helmet({
@@ -36,7 +46,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", ...allowedOrigins],
     }
   },
   hsts: {
@@ -48,8 +58,6 @@ app.use(helmet({
 }));
 
 // ─── CORS ────────────────────────────────────────────────────────
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',');
-
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps or curl requests)
@@ -72,11 +80,36 @@ app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// ─── Content-Type Validation ─────────────────────────────────────
+// Reject non-JSON bodies on state-changing requests to prevent
+// content-type confusion attacks
+app.use('/api', (req, res, next) => {
+  if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+    const contentType = req.get('Content-Type') || '';
+    // Allow JSON, form-urlencoded, multipart (for file uploads), and raw (for webhooks)
+    if (
+      !contentType.includes('application/json') &&
+      !contentType.includes('application/x-www-form-urlencoded') &&
+      !contentType.includes('multipart/form-data') &&
+      !contentType.includes('application/octet-stream') &&
+      req.path !== '/webhooks/stripe' // Stripe sends raw
+    ) {
+      res.status(415).json({ error: 'Unsupported Content-Type. Use application/json.' });
+      return;
+    }
+  }
+  next();
+});
+
+// ─── Input sanitization & safe JSON encoding ─────────────────────
+app.use(sanitizeRequest);
+app.use(safeJsonMiddleware);
+
 // ─── Server-Side Sessions with Redis Store ───────────────────────
 const redisStore = new RedisStore({
   client: redis,
   prefix: 'sess:',
-  ttl: 86400 // 24 hours
+  ttl: 15 * 24 * 60 * 60 // 15 days in seconds
 });
 
 app.use(session({
@@ -88,16 +121,32 @@ app.use(session({
   cookie: {
     httpOnly: true,           // Prevents XSS access to cookie
     secure: process.env.NODE_ENV === 'production',   // HTTPS only in prod
-    sameSite: 'strict',       // CSRF protection
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',  // 'lax' in dev for cross-port cookies
+    maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days — matches requirement
     path: '/',
     domain: undefined         // Let browser infer
   }
 }));
 
+// Require a strong session secret in production
+if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+  logger.error('SESSION_SECRET is required in production environment');
+  // Fail fast to avoid running with insecure defaults
+  process.exit(1);
+}
+
 // ─── Trust Proxy (for rate limiting behind reverse proxy) ────────
 if (process.env.NODE_ENV === 'production') {
   app.set('trust proxy', 1);
+}
+
+// ─── Enforce HTTPS in production (works behind a proxy) ──────────
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    const proto = (req.headers['x-forwarded-proto'] || '').toString();
+    if (req.secure || proto === 'https') return next();
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  });
 }
 
 // ─── Strict Cache-Control Headers ────────────────────────────────
@@ -111,6 +160,12 @@ app.use('/api', (req, res, next) => {
 // ─── CSRF Protection ─────────────────────────────────────────────
 app.use(generateCsrfToken);
 app.use('/api', verifyCsrfToken);
+
+// (Input sanitization handled by `sanitizeRequest` middleware above)
+
+// ─── IP Access Control (block-list / allow-list / auto-ban) ──────
+// Runs before the rate limiters so already-banned IPs are rejected cheaply.
+app.use('/api', ipAccessControl);
 
 // ─── Rate Limiting ───────────────────────────────────────────────
 app.use('/api/', globalLimiter);
