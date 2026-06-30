@@ -75,6 +75,7 @@ model User {
   clientTransactions    Transaction[] @relation("ClientTransactions")
   freelancerTransactions Transaction[] @relation("FreelancerTransactions")
   securityAlerts    SecurityAlert[]
+  webauthnCredentials WebAuthnCredential[]
 
   @@map("users")
 }
@@ -155,6 +156,23 @@ model AuditLog {
   @@index([action])
   @@index([timestamp])
   @@map("audit_logs")
+}
+
+model WebAuthnCredential {
+  id         String    @id // base64url-encoded credential ID from the authenticator
+  userId     String    @map("user_id")
+  publicKey  Bytes     @map("public_key")
+  counter    BigInt    @default(0) // signature counter for clone/replay detection
+  transports String[]  // e.g. ["internal", "usb", "hybrid"]
+  deviceType String?   @map("device_type")
+  backedUp   Boolean   @default(false) @map("backed_up")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
 }
 
 model PasswordHistory {
