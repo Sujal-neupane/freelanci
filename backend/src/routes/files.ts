@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
-import { uploadMiddleware } from '../middleware/upload';
+import { uploadMiddleware, fileSignatureMatches } from '../middleware/upload';
 import { requireAuth, requireMfaComplete } from '../middleware/auth';
 import { createAuditLog } from '../services/auditService';
 import logger from '../utils/logger';
@@ -27,6 +27,19 @@ router.post('/:jobId', requireAuth, requireMfaComplete, (req, res, next) => {
 
     if (!req.file) {
       res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    // Verify the file's real magic bytes match its claimed MIME type. Blocks
+    // disguised payloads (e.g. an HTML/PHP file relabelled as image/png).
+    if (!fileSignatureMatches(req.file.path, req.file.mimetype)) {
+      fs.unlinkSync(req.file.path);
+      logger.warn('File upload rejected — signature/MIME mismatch', {
+        mimetype: req.file.mimetype,
+        originalName: req.file.originalname,
+        ip: req.ip
+      });
+      res.status(400).json({ error: 'File content does not match its declared type' });
       return;
     }
 
@@ -116,6 +129,12 @@ router.get('/:jobId/:filename', requireAuth, requireMfaComplete, async (req: Req
       metadata: { jobId }
     });
 
+    // Force download instead of inline rendering, and stop the browser from
+    // MIME-sniffing the content into something executable — neutralises
+    // stored-XSS / drive-by via uploaded files.
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     res.sendFile(filePath);
   } catch (error) {
     logger.error('File download error', { error: (error as Error).message });
