@@ -15,6 +15,7 @@ import { Disputes } from './pages/Disputes';
 import { AdminUsers } from './pages/AdminUsers';
 import { AdminAuditLogs } from './pages/AdminAuditLogs';
 import { AdminAlerts } from './pages/AdminAlerts';
+import { ActivityLog } from './pages/ActivityLog';
 
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, loading } = useAuth();
@@ -60,6 +61,7 @@ const AppContent = () => {
       <Route path="/admin/users" element={<ProtectedPage><AdminUsers /></ProtectedPage>} />
       <Route path="/admin/audit-logs" element={<ProtectedPage><AdminAuditLogs /></ProtectedPage>} />
       <Route path="/admin/alerts" element={<ProtectedPage><AdminAlerts /></ProtectedPage>} />
+      <Route path="/activity-log" element={<ProtectedPage><ActivityLog /></ProtectedPage>} />
       <Route path="/settings" element={<ProtectedPage><Settings /></ProtectedPage>} />
     </Routes>
   );
