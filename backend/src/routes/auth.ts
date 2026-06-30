@@ -2,12 +2,55 @@ import { Router, Request, Response } from 'express';
 import { register, login, changePassword, forceResetPassword } from '../services/authService';
 import { generateMfaSecret, verifyMfaToken, enableMfa, disableMfa } from '../services/mfaService';
 import { createAuditLog } from '../services/auditService';
+import { createSecurityAlert } from '../services/alertService';
 import { requireAuth, requireMfaComplete } from '../middleware/auth';
+import { requireRole } from '../middleware/rbac';
 import { PrismaClient } from '@prisma/client';
 import logger from '../utils/logger';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+// Max TOTP guesses allowed within a single pending-MFA session before we tear
+// it down. A 6-digit code has 10^6 possibilities; capping attempts per session
+// (and requiring a fresh credential check to get a new pending session) makes
+// brute-forcing the second factor infeasible.
+const MAX_MFA_ATTEMPTS = 5;
+
+// ─── Helper: Session Regeneration that Preserves CSRF Token ──────
+// The core bug fix: when Express regenerates the session (to prevent
+// session fixation), the old session data is discarded — including
+// the CSRF token. This helper saves the CSRF token before regeneration
+// and restores it into the new session.
+function regenerateSessionSafe(
+  req: Request,
+  sessionData: Record<string, unknown>,
+  callback: (err: Error | null) => void
+): void {
+  const oldCsrfToken = req.session?.csrfToken;
+
+  req.session.regenerate((err) => {
+    if (err) {
+      return callback(err);
+    }
+
+    // Restore CSRF token so the browser's XSRF-TOKEN cookie stays valid
+    if (oldCsrfToken) {
+      req.session.csrfToken = oldCsrfToken;
+    }
+
+    // Apply all provided session data
+    for (const [key, value] of Object.entries(sessionData)) {
+      (req.session as any)[key] = value;
+    }
+
+    // Always set timestamps
+    req.session.createdAt = Date.now();
+    req.session.lastActive = Date.now();
+
+    callback(null);
+  });
+}
 
 // ─── POST /api/auth/register ─────────────────────────────────────
 router.post('/register', async (req: Request, res: Response) => {
@@ -67,31 +110,46 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     if (result.requiresMfa) {
-      // Store pending MFA state in session
-      req.session.mfaPending = true;
-      req.session.pendingUserId = result.userId;
-      req.session.mfaVerified = false;
+      // Regenerate session to prevent fixation, then set pending MFA state
+      regenerateSessionSafe(req, {
+        mfaPending: true,
+        pendingUserId: result.userId,
+        mfaVerified: false,
+        userAgent
+      }, (err) => {
+        if (err) {
+          logger.error('Session regen failed (MFA init)', { error: err.message });
+          res.status(500).json({ error: 'Failed to initialize MFA session' });
+          return;
+        }
 
-      res.json({
-        message: 'Credentials verified — MFA code required',
-        requiresMfa: true
+        res.json({
+          message: 'Credentials verified — MFA code required',
+          requiresMfa: true
+        });
       });
       return;
     }
 
-    // No MFA — create full session
-    req.session.userId = result.user!.id;
-    req.session.email = result.user!.email;
-    req.session.role = result.user!.role;
-    req.session.userAgent = userAgent;
-    req.session.mfaVerified = true;
-    req.session.mfaPending = false;
-    req.session.createdAt = Date.now();
-    req.session.lastActive = Date.now();
+    // No MFA — regenerate session to prevent fixation and establish authenticated session
+    regenerateSessionSafe(req, {
+      userId: result.user!.id,
+      email: result.user!.email,
+      role: result.user!.role,
+      userAgent,
+      mfaVerified: true,
+      mfaPending: false
+    }, (err) => {
+      if (err) {
+        logger.error('Session regen failed (login)', { error: err.message });
+        res.status(500).json({ error: 'Failed to establish session' });
+        return;
+      }
 
-    res.json({
-      message: 'Login successful',
-      user: result.user
+      res.json({
+        message: 'Login successful',
+        user: result.user
+      });
     });
   } catch (error) {
     logger.error('Login error', { error: (error as Error).message });
@@ -122,16 +180,45 @@ router.post('/login/mfa', async (req: Request, res: Response) => {
       const ip = req.ip || 'unknown';
       const userAgent = req.get('User-Agent') || 'unknown';
 
+      // Count this failed guess against the pending session.
+      req.session.mfaAttempts = (req.session.mfaAttempts || 0) + 1;
+      const attempts = req.session.mfaAttempts;
+
       await createAuditLog({
         userId,
         action: 'MFA_VERIFICATION_FAILED',
         resourceType: 'auth',
         resourceId: userId,
         ipAddress: ip,
-        userAgent
+        userAgent,
+        metadata: { attempts }
       });
 
-      res.status(401).json({ error: 'Invalid MFA code' });
+      // Too many guesses → assume brute-force. Destroy the pending session so
+      // the attacker must pass the password check again to get a new one, and
+      // surface a security alert for the admins.
+      if (attempts >= MAX_MFA_ATTEMPTS) {
+        await createSecurityAlert(
+          'MFA_BRUTE_FORCE',
+          'HIGH',
+          `Pending MFA session exceeded ${MAX_MFA_ATTEMPTS} failed code attempts`,
+          ip,
+          userId
+        );
+
+        req.session.destroy(() => {});
+        res.clearCookie('__freelanci_sid');
+        res.status(429).json({
+          error: 'Too many incorrect codes — please log in again',
+          mfaSessionTerminated: true
+        });
+        return;
+      }
+
+      res.status(401).json({
+        error: 'Invalid MFA code',
+        remainingAttempts: MAX_MFA_ATTEMPTS - attempts
+      });
       return;
     }
 
@@ -146,27 +233,33 @@ router.post('/login/mfa', async (req: Request, res: Response) => {
       return;
     }
 
-    // Complete session
+    // Complete session — regenerate to bind fresh session id after 2nd factor
     const userAgent = req.get('User-Agent') || 'unknown';
-    req.session.userId = user.id;
-    req.session.email = user.email;
-    req.session.role = user.role;
-    req.session.userAgent = userAgent;
-    req.session.mfaVerified = true;
-    req.session.mfaPending = false;
-    req.session.pendingUserId = undefined;
-    req.session.createdAt = Date.now();
-    req.session.lastActive = Date.now();
-
-    res.json({
-      message: 'MFA verification successful',
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        mfaEnabled: user.mfaEnabled
+    regenerateSessionSafe(req, {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      userAgent,
+      mfaVerified: true,
+      mfaPending: false,
+      pendingUserId: undefined
+    }, (err) => {
+      if (err) {
+        logger.error('Session regen failed (MFA complete)', { error: err.message });
+        res.status(500).json({ error: 'Failed to establish session' });
+        return;
       }
+
+      res.json({
+        message: 'MFA verification successful',
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          mfaEnabled: user.mfaEnabled
+        }
+      });
     });
   } catch (error) {
     logger.error('MFA verification error', { error: (error as Error).message });
@@ -197,7 +290,13 @@ router.post('/logout', requireAuth, async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Logout failed' });
         return;
       }
-      res.clearCookie('__freelanci_sid');
+      // Clear cookie with same attributes to ensure browser removes it
+      res.clearCookie('__freelanci_sid', {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+        path: '/'
+      });
       res.json({ message: 'Logged out successfully' });
     });
   } catch (error) {
@@ -268,6 +367,9 @@ router.post('/mfa/verify-setup', requireAuth, requireMfaComplete, async (req: Re
   try {
     const { token } = req.body;
     const userId = req.session.userId!;
+    const email = req.session.email!;
+    const role = req.session.role!;
+    const userAgent = req.session.userAgent || req.get('User-Agent') || 'unknown';
 
     if (!token || token.length !== 6) {
       res.status(400).json({ error: 'A 6-digit code is required' });
@@ -282,7 +384,6 @@ router.post('/mfa/verify-setup', requireAuth, requireMfaComplete, async (req: Re
     }
 
     const ip = req.ip || 'unknown';
-    const userAgent = req.get('User-Agent') || 'unknown';
 
     await createAuditLog({
       userId,
@@ -293,7 +394,20 @@ router.post('/mfa/verify-setup', requireAuth, requireMfaComplete, async (req: Re
       userAgent
     });
 
-    res.json({ message: 'MFA enabled successfully' });
+    // Rotate session after enabling MFA — preserve ALL session state
+    regenerateSessionSafe(req, {
+      userId,
+      email,
+      role,
+      userAgent,
+      mfaVerified: true,
+      mfaPending: false
+    }, (err) => {
+      if (err) {
+        logger.error('Session regen failed (mfa enable)', { error: err.message });
+      }
+      res.json({ message: 'MFA enabled successfully' });
+    });
   } catch (error) {
     logger.error('MFA verify setup error', { error: (error as Error).message });
     res.status(500).json({ error: 'MFA verification failed' });
@@ -305,6 +419,9 @@ router.post('/mfa/disable', requireAuth, requireMfaComplete, async (req: Request
   try {
     const { token } = req.body;
     const userId = req.session.userId!;
+    const email = req.session.email!;
+    const role = req.session.role!;
+    const userAgent = req.session.userAgent || req.get('User-Agent') || 'unknown';
 
     if (!token || token.length !== 6) {
       res.status(400).json({ error: 'Current MFA code required to disable' });
@@ -319,7 +436,6 @@ router.post('/mfa/disable', requireAuth, requireMfaComplete, async (req: Request
     }
 
     const ip = req.ip || 'unknown';
-    const userAgent = req.get('User-Agent') || 'unknown';
 
     await createAuditLog({
       userId,
@@ -330,7 +446,20 @@ router.post('/mfa/disable', requireAuth, requireMfaComplete, async (req: Request
       userAgent
     });
 
-    res.json({ message: 'MFA disabled successfully' });
+    // Rotate session after disabling MFA — preserve session state
+    regenerateSessionSafe(req, {
+      userId,
+      email,
+      role,
+      userAgent,
+      mfaVerified: true,
+      mfaPending: false
+    }, (err) => {
+      if (err) {
+        logger.error('Session regen failed (mfa disable)', { error: err.message });
+      }
+      res.json({ message: 'MFA disabled successfully' });
+    });
   } catch (error) {
     logger.error('MFA disable error', { error: (error as Error).message });
     res.status(500).json({ error: 'Failed to disable MFA' });
@@ -342,8 +471,10 @@ router.post('/change-password', requireAuth, requireMfaComplete, async (req: Req
   try {
     const { oldPassword, newPassword } = req.body;
     const userId = req.session.userId!;
+    const email = req.session.email!;
+    const role = req.session.role!;
     const ip = req.ip || 'unknown';
-    const userAgent = req.get('User-Agent') || 'unknown';
+    const userAgent = req.session.userAgent || req.get('User-Agent') || 'unknown';
 
     if (!oldPassword || !newPassword) {
       res.status(400).json({ error: 'Old and new passwords are required' });
@@ -357,7 +488,20 @@ router.post('/change-password', requireAuth, requireMfaComplete, async (req: Req
       return;
     }
 
-    res.json({ message: 'Password changed successfully' });
+    // Rotate session after password change — preserve session state
+    regenerateSessionSafe(req, {
+      userId,
+      email,
+      role,
+      userAgent,
+      mfaVerified: true,
+      mfaPending: false
+    }, (err) => {
+      if (err) {
+        logger.error('Session regen failed (password change)', { error: err.message });
+      }
+      res.json({ message: 'Password changed successfully' });
+    });
   } catch (error) {
     logger.error('Change password error', { error: (error as Error).message });
     res.status(500).json({ error: 'Password change failed' });
@@ -365,7 +509,8 @@ router.post('/change-password', requireAuth, requireMfaComplete, async (req: Req
 });
 
 // ─── POST /api/auth/force-reset ──────────────────────────────────
-router.post('/force-reset', async (req: Request, res: Response) => {
+// SECURITY FIX: Now requires admin authentication
+router.post('/force-reset', requireAuth, requireMfaComplete, requireRole('ADMIN'), async (req: Request, res: Response) => {
   try {
     const { userId, newPassword } = req.body;
     const ip = req.ip || 'unknown';
